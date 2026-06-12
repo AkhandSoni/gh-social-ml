@@ -112,7 +112,6 @@ class RepositoryEnricher:
                 readme_text = self.graphql_client.get_readme(owner, name)
 
             if readme_text:
-                from utils.readme_processor import process_markdown
                 readme = process_markdown(readme_text)
                 # Patch the result with the real README data
                 result.readme = readme
