@@ -36,8 +36,10 @@ def build_batch_metadata_query(repos: list[tuple[str, str]]) -> str:
     parts = ["query GetBatchMetadata {"]
     for i, (owner, name) in enumerate(repos):
         alias = f"repo_{i}"
+        escaped_owner = owner.replace('\\', '\\\\').replace('"', '\\"')
+        escaped_name = name.replace('\\', '\\\\').replace('"', '\\"')
         parts.append(f"""
-  {alias}: repository(owner: "{owner}", name: "{name}") {{
+  {alias}: repository(owner: "{escaped_owner}", name: "{escaped_name}") {{
     nameWithOwner
     name
     description
@@ -65,6 +67,7 @@ def build_batch_metadata_query(repos: list[tuple[str, str]]) -> str:
       }}
     }}
   }}""")
+
     parts.append("""
   rateLimit { cost remaining resetAt }
 }""")
