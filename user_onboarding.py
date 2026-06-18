@@ -48,9 +48,12 @@ try:
 except (ValueError, TypeError):
     logger.warning(f"Invalid VECTOR_DIMENSION in environment: {dim_value}. Using default 384")
     VECTOR_DIMENSION: int = 384
+
 QDRANT_URL: str | None = os.getenv("QDRANT_URL", None)
 QDRANT_API_KEY: str | None = os.getenv("QDRANT_API_KEY", None)
 USER_PROFILES_COLLECTION: str = "user_profiles"
+# Optional explicit target for multi-vector collections
+TARGET_VECTOR_NAME: str | None = os.getenv("TARGET_VECTOR_NAME", None)
 
 
 def _synthesize_user_context_impl(user_data: Dict[str, Any]) -> str:
@@ -186,17 +189,6 @@ class UserOnboardingPipeline:
 
         Returns:
             A single dense text string combining all user profile information.
-
-        Example:
-            >>> user_data = {
-            ...     "skills": ["Python", "Machine Learning"],
-            ...     "tech_stack": ["PyTorch", "FastAPI"],
-            ...     "interests": ["AI", "Open Source"],
-            ...     "bio": "ML engineer passionate about NLP"
-            ... }
-            >>> context = synthesize_user_context(user_data)
-            >>> print(context)
-            'Skills: Python, Machine Learning. Tech Stack: PyTorch, FastAPI. ...
         """
         return _synthesize_user_context_impl(user_data)
 
@@ -354,10 +346,8 @@ class UserOnboardingPipeline:
                     logger.info(f"Collection '{USER_PROFILES_COLLECTION}' created successfully.")
                 except Exception as exc:
                     # Handle race condition: collection may have been created by another process
-                    # Only catch "already exists" errors - let all other errors propagate
                     if "already exists" in str(exc).lower():
                         logger.info(f"Collection '{USER_PROFILES_COLLECTION}' already exists (race condition handled).")
-                        # Validate schema of the race-condition-created collection
                         logger.info(f"Validating schema for race-condition-created collection...")
                         collection_info = client.get_collection(USER_PROFILES_COLLECTION)
                         if collection_info is None or collection_info.config is None or collection_info.config.params is None:
@@ -367,44 +357,49 @@ class UserOnboardingPipeline:
                         if vectors_config is None:
                             raise ValueError(f"Collection '{USER_PROFILES_COLLECTION}' has no vectors configuration.")
                         
-                        # Handle dict, named-vector dict, or VectorParams formats
                         if isinstance(vectors_config, dict):
-                            # Check if it's a flat config dict (has "size" key)
                             if "size" in vectors_config:
                                 existing_size = vectors_config.get("size")
                                 existing_distance = vectors_config.get("distance")
                             else:
-                                # Assume it's a named-vector mapping: {"": VectorParams(...)} or {"default": VectorParams(...)}
                                 if not vectors_config:
                                     raise ValueError(f"Collection '{USER_PROFILES_COLLECTION}' has empty named-vector configuration.")
-                                # Extract vector name
-                                vector_name = list(vectors_config.keys())[0]
-                                first_config = vectors_config[vector_name]
-                                existing_size = getattr(first_config, "size", None)
-                                existing_distance = getattr(first_config, "distance", None)
+                                
+                                # GREPTILE FIX: Explicit vector selection logic
+                                if TARGET_VECTOR_NAME:
+                                    if TARGET_VECTOR_NAME not in vectors_config:
+                                        raise ValueError(f"Target vector '{TARGET_VECTOR_NAME}' not found in collection.")
+                                    vector_name = TARGET_VECTOR_NAME
+                                else:
+                                    matching_vectors = [
+                                        name for name, conf in vectors_config.items() 
+                                        if getattr(conf, "size", None) == VECTOR_DIMENSION
+                                    ]
+                                    if len(matching_vectors) == 1:
+                                        vector_name = matching_vectors[0]
+                                    elif len(matching_vectors) == 0:
+                                        raise ValueError(f"No vectors match dimension {VECTOR_DIMENSION} in collection '{USER_PROFILES_COLLECTION}'.")
+                                    else:
+                                        raise ValueError(f"Ambiguous vector targets. Multiple vectors match dimension {VECTOR_DIMENSION}. Set TARGET_VECTOR_NAME.")
+                                
+                                target_config = vectors_config[vector_name]
+                                existing_size = getattr(target_config, "size", None)
+                                existing_distance = getattr(target_config, "distance", None)
                         else:
-                            # Direct VectorParams object
                             existing_size = getattr(vectors_config, "size", None)
                             existing_distance = getattr(vectors_config, "distance", None)
                         
                         if existing_size != VECTOR_DIMENSION:
                             raise ValueError(
-                                f"Collection '{USER_PROFILES_COLLECTION}' schema mismatch: "
-                                f"existing vector size is {existing_size}, but expected {VECTOR_DIMENSION}. "
-                                f"Recreate the collection with the correct configuration."
+                                f"Collection schema mismatch: existing vector size is {existing_size}, but expected {VECTOR_DIMENSION}."
                             )
                         
-                        # Normalize distance metric comparison (Qdrant may return different representations)
                         expected_distance = str(Distance.COSINE).upper()
                         actual_distance = str(existing_distance).upper() if existing_distance else ""
                         if expected_distance not in actual_distance and actual_distance not in expected_distance:
                             raise ValueError(
-                                f"Collection '{USER_PROFILES_COLLECTION}' schema mismatch: "
-                                f"existing distance metric is {existing_distance}, but expected {Distance.COSINE}. "
-                                f"Recreate the collection with the correct configuration."
+                                f"Collection schema mismatch: existing distance metric is {existing_distance}, but expected {Distance.COSINE}."
                             )
-                        
-                        logger.info(f"Collection '{USER_PROFILES_COLLECTION}' schema validated successfully.")
                     else:
                         raise
             else:
@@ -418,41 +413,48 @@ class UserOnboardingPipeline:
                 if vectors_config is None:
                     raise ValueError(f"Collection '{USER_PROFILES_COLLECTION}' has no vectors configuration.")
                 
-                # Handle dict, named-vector dict, or VectorParams formats
                 if isinstance(vectors_config, dict):
-                    # Check if it's a flat config dict (has "size" key)
                     if "size" in vectors_config:
                         existing_size = vectors_config.get("size")
                         existing_distance = vectors_config.get("distance")
                     else:
-                        # Assume it's a named-vector mapping: {"": VectorParams(...)} or {"default": VectorParams(...)}
                         if not vectors_config:
                             raise ValueError(f"Collection '{USER_PROFILES_COLLECTION}' has empty named-vector configuration.")
-                        # Extract vector name
-                        vector_name = list(vectors_config.keys())[0]
-                        first_config = vectors_config[vector_name]
-                        existing_size = getattr(first_config, "size", None)
-                        existing_distance = getattr(first_config, "distance", None)
+                        
+                        # GREPTILE FIX: Explicit vector selection logic
+                        if TARGET_VECTOR_NAME:
+                            if TARGET_VECTOR_NAME not in vectors_config:
+                                raise ValueError(f"Target vector '{TARGET_VECTOR_NAME}' not found in collection.")
+                            vector_name = TARGET_VECTOR_NAME
+                        else:
+                            matching_vectors = [
+                                name for name, conf in vectors_config.items() 
+                                if getattr(conf, "size", None) == VECTOR_DIMENSION
+                            ]
+                            if len(matching_vectors) == 1:
+                                vector_name = matching_vectors[0]
+                            elif len(matching_vectors) == 0:
+                                raise ValueError(f"No vectors match dimension {VECTOR_DIMENSION} in collection '{USER_PROFILES_COLLECTION}'.")
+                            else:
+                                raise ValueError(f"Ambiguous vector targets. Multiple vectors match dimension {VECTOR_DIMENSION}. Set TARGET_VECTOR_NAME.")
+                        
+                        target_config = vectors_config[vector_name]
+                        existing_size = getattr(target_config, "size", None)
+                        existing_distance = getattr(target_config, "distance", None)
                 else:
-                    # Direct VectorParams object
                     existing_size = getattr(vectors_config, "size", None)
                     existing_distance = getattr(vectors_config, "distance", None)
                 
                 if existing_size != VECTOR_DIMENSION:
                     raise ValueError(
-                        f"Collection '{USER_PROFILES_COLLECTION}' schema mismatch: "
-                        f"existing vector size is {existing_size}, but expected {VECTOR_DIMENSION}. "
-                        f"Recreate the collection with the correct configuration."
+                        f"Collection schema mismatch: existing vector size is {existing_size}, but expected {VECTOR_DIMENSION}."
                     )
                 
-                # Normalize distance metric comparison (Qdrant may return different representations)
                 expected_distance = str(Distance.COSINE).upper()
                 actual_distance = str(existing_distance).upper() if existing_distance else ""
                 if expected_distance not in actual_distance and actual_distance not in expected_distance:
                     raise ValueError(
-                        f"Collection '{USER_PROFILES_COLLECTION}' schema mismatch: "
-                        f"existing distance metric is {existing_distance}, but expected {Distance.COSINE}. "
-                        f"Recreate the collection with the correct configuration."
+                        f"Collection schema mismatch: existing distance metric is {existing_distance}, but expected {Distance.COSINE}."
                     )
                 
                 logger.info(f"Collection '{USER_PROFILES_COLLECTION}' schema validated successfully.")
@@ -522,39 +524,10 @@ class UserOnboardingPipeline:
 # ── Convenience Functions ───────────────────────────────────────────────────────
 
 def synthesize_user_context(user_data: Dict[str, Any]) -> str:
-    """Flatten user profile data into a single dense text string.
-
-    This is a standalone convenience function that calls the pure helper
-    directly without loading the SentenceTransformer model.
-
-    Args:
-        user_data: Dictionary containing user profile fields.
-
-    Returns:
-        A single dense text string combining all user profile information.
-
-    Raises:
-        ValueError: If user_data is not a dictionary.
-    """
     return _synthesize_user_context_impl(user_data)
 
 
 def generate_interest_vector(user_data: Dict[str, Any]) -> list[float]:
-    """Generate Day-1 Initial Interest Vector from user profile data.
-
-    This is a standalone convenience function. For repeated use, instantiate
-    the UserOnboardingPipeline class directly.
-
-    Args:
-        user_data: Dictionary containing user profile fields.
-
-    Returns:
-        A list of floats representing the user's interest vector.
-
-    Raises:
-        ValueError: If user_data is not a dictionary.
-    """
-    # Validate input before creating pipeline to avoid unnecessary model loading
     if not isinstance(user_data, dict):
         raise ValueError("user_data must be a dictionary.")
     
@@ -569,33 +542,11 @@ def save_user_vector_to_qdrant(
     qdrant_url: str | None = None,
     qdrant_api_key: str | None = None,
 ) -> bool:
-    """Save user interest vector to Qdrant database.
-
-    This is a standalone convenience function. For repeated use, instantiate
-    the UserOnboardingPipeline class directly.
-
-    Args:
-        user_id: Unique identifier for the user.
-        vector: The interest vector to store.
-        payload: Optional dictionary of additional metadata.
-        qdrant_url: Optional Qdrant server URL.
-        qdrant_api_key: Optional Qdrant API key.
-
-    Returns:
-        True if the vector was successfully saved, False otherwise.
-
-    Raises:
-        ImportError: If qdrant-client is not installed.
-        ValueError: If user_id or vector validation fails.
-        Exception: If Qdrant operation fails (propagated for caller handling).
-    """
-    # Validate inputs before creating pipeline to avoid unnecessary model loading
     if not user_id or not isinstance(user_id, str):
         raise ValueError("user_id must be a non-empty string.")
     if not isinstance(vector, list) or len(vector) == 0:
         raise ValueError("vector must be a non-empty list.")
     
-    # Use pipeline instance for save_to_qdrant (no ML model needed)
     pipeline = UserOnboardingPipeline()
     return pipeline.save_to_qdrant(
         user_id=user_id,
@@ -612,25 +563,6 @@ def onboard_user(
     qdrant_url: str | None = None,
     qdrant_api_key: str | None = None,
 ) -> bool:
-    """Complete onboarding workflow: generate vector and save to Qdrant.
-
-    This is a standalone convenience function. For repeated use, instantiate
-    the UserOnboardingPipeline class directly.
-
-    Args:
-        user_id: Unique identifier for the user.
-        user_data: Dictionary containing user profile fields.
-        qdrant_url: Optional Qdrant server URL.
-        qdrant_api_key: Optional Qdrant API key.
-
-    Returns:
-        True if onboarding succeeded, False otherwise.
-
-    Raises:
-        ValueError: If user_id or user_data validation fails.
-        ImportError: If required dependencies are not installed.
-    """
-    # Validate inputs before creating pipeline to avoid unnecessary model loading
     if not user_id or not isinstance(user_id, str):
         raise ValueError("user_id must be a non-empty string.")
     if not isinstance(user_data, dict):
