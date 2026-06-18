@@ -181,11 +181,7 @@ class UserOnboardingPipeline:
         the SentenceTransformer model when only text synthesis is needed.
 
         Args:
-            user_data: Dictionary containing user profile fields:
-                - skills: List[str] - User's technical skills
-                - tech_stack: List[str] - User's technology stack preferences
-                - interests: List[str] - User's interests
-                - bio: str - User's biography/description
+            user_data: Dictionary containing user profile fields.
 
         Returns:
             A single dense text string combining all user profile information.
@@ -365,22 +361,24 @@ class UserOnboardingPipeline:
                                 if not vectors_config:
                                     raise ValueError(f"Collection '{USER_PROFILES_COLLECTION}' has empty named-vector configuration.")
                                 
-                                # GREPTILE FIX: Explicit vector selection logic
+                                # GREPTILE FIX: Explicit vector selection logic factoring in distance too
                                 if TARGET_VECTOR_NAME:
                                     if TARGET_VECTOR_NAME not in vectors_config:
                                         raise ValueError(f"Target vector '{TARGET_VECTOR_NAME}' not found in collection.")
                                     vector_name = TARGET_VECTOR_NAME
                                 else:
+                                    expected_dist_str = str(Distance.COSINE).upper()
                                     matching_vectors = [
                                         name for name, conf in vectors_config.items() 
-                                        if getattr(conf, "size", None) == VECTOR_DIMENSION
+                                        if getattr(conf, "size", None) == VECTOR_DIMENSION and 
+                                           expected_dist_str in str(getattr(conf, "distance", "")).upper()
                                     ]
                                     if len(matching_vectors) == 1:
                                         vector_name = matching_vectors[0]
                                     elif len(matching_vectors) == 0:
-                                        raise ValueError(f"No vectors match dimension {VECTOR_DIMENSION} in collection '{USER_PROFILES_COLLECTION}'.")
+                                        raise ValueError(f"No vectors match dimension {VECTOR_DIMENSION} and distance {Distance.COSINE} in collection '{USER_PROFILES_COLLECTION}'.")
                                     else:
-                                        raise ValueError(f"Ambiguous vector targets. Multiple vectors match dimension {VECTOR_DIMENSION}. Set TARGET_VECTOR_NAME.")
+                                        raise ValueError(f"Ambiguous vector targets. Multiple vectors match dimension {VECTOR_DIMENSION} and distance {Distance.COSINE}. Set TARGET_VECTOR_NAME.")
                                 
                                 target_config = vectors_config[vector_name]
                                 existing_size = getattr(target_config, "size", None)
@@ -421,22 +419,24 @@ class UserOnboardingPipeline:
                         if not vectors_config:
                             raise ValueError(f"Collection '{USER_PROFILES_COLLECTION}' has empty named-vector configuration.")
                         
-                        # GREPTILE FIX: Explicit vector selection logic
+                        # GREPTILE FIX: Explicit vector selection logic factoring in distance too
                         if TARGET_VECTOR_NAME:
                             if TARGET_VECTOR_NAME not in vectors_config:
                                 raise ValueError(f"Target vector '{TARGET_VECTOR_NAME}' not found in collection.")
                             vector_name = TARGET_VECTOR_NAME
                         else:
+                            expected_dist_str = str(Distance.COSINE).upper()
                             matching_vectors = [
                                 name for name, conf in vectors_config.items() 
-                                if getattr(conf, "size", None) == VECTOR_DIMENSION
+                                if getattr(conf, "size", None) == VECTOR_DIMENSION and 
+                                   expected_dist_str in str(getattr(conf, "distance", "")).upper()
                             ]
                             if len(matching_vectors) == 1:
                                 vector_name = matching_vectors[0]
                             elif len(matching_vectors) == 0:
-                                raise ValueError(f"No vectors match dimension {VECTOR_DIMENSION} in collection '{USER_PROFILES_COLLECTION}'.")
+                                raise ValueError(f"No vectors match dimension {VECTOR_DIMENSION} and distance {Distance.COSINE} in collection '{USER_PROFILES_COLLECTION}'.")
                             else:
-                                raise ValueError(f"Ambiguous vector targets. Multiple vectors match dimension {VECTOR_DIMENSION}. Set TARGET_VECTOR_NAME.")
+                                raise ValueError(f"Ambiguous vector targets. Multiple vectors match dimension {VECTOR_DIMENSION} and distance {Distance.COSINE}. Set TARGET_VECTOR_NAME.")
                         
                         target_config = vectors_config[vector_name]
                         existing_size = getattr(target_config, "size", None)
