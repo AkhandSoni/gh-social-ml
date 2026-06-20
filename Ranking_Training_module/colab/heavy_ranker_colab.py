@@ -136,10 +136,18 @@ else:
     y_dwell = data['y_dwell']
     y_follow = data['y_follow']
     
+    import json
     print("Scaling features...")
     scaler = StandardScaler()
     dense_features_scaled = scaler.fit_transform(dense_features).astype(np.float32)
-    joblib.dump(scaler, 'feature_scaler.pkl')
+    
+    # Save safely as JSON instead of Pickle
+    scaler_params = {
+        "mean": scaler.mean_.tolist(),
+        "scale": scaler.scale_.tolist()
+    }
+    with open('feature_scaler.json', 'w') as f:
+        json.dump(scaler_params, f)
     
     # Use index-based splitting so we don't duplicate massive arrays in memory
     indices = np.arange(len(user_embs))
@@ -232,4 +240,4 @@ for epoch in range(epochs):
 # %%
 torch.save(model.state_dict(), "heavy_ranker.pt")
 print("✅ Training Complete! Model saved as 'heavy_ranker.pt'.")
-print("Download 'heavy_ranker.pt' and 'feature_scaler.pkl' for your backend.")
+print("Download 'heavy_ranker.pt' and 'feature_scaler.json' for your backend.")
