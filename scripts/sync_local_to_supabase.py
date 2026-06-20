@@ -45,6 +45,11 @@ def sync():
     if not local_db.verify_connection():
         logger.error("Failed to connect to local database.")
         return
+    # Ensure local database schema is fully initialized/upgraded before querying
+    try:
+        local_db.init_db()
+    except Exception as exc:
+        logger.warning(f"Local database schema initialization warning: {exc}")
         
     # 2. Connect to Supabase
     supabase_url = os.getenv("SUPABASE_DATABASE_URL") or os.getenv("SUPABASE_DB_URL")
