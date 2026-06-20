@@ -1,10 +1,12 @@
 import os
 import logging
 import json
+import re
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 # Import connector
-from database.connector import PostgreSQLConnector
+from database.connector import PostgreSQLConnector, _SUPABASE_HOST_RE
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s")
@@ -14,19 +16,62 @@ def sync():
     load_dotenv()
     
     # 1. Connect to Local PostgreSQL
-    local_url = "postgresql://medhanshadhlakha@localhost:5432/gh_social"
-    logger.info(f"Connecting to Local PostgreSQL: {local_url}")
+    local_url = os.getenv("LOCAL_DATABASE_URL")
+    if not local_url:
+        db_url = os.getenv("DATABASE_URL")
+        # Check if database_url is local (i.e. not Supabase)
+        is_supabase = False
+        if db_url:
+            try:
+                hostname = urlparse(db_url).hostname or ""
+                is_supabase = bool(_SUPABASE_HOST_RE.search(hostname))
+            except Exception:
+                pass
+        
+        if db_url and not is_supabase:
+            local_url = db_url
+        else:
+            local_url = "postgresql://medhanshadhlakha@localhost:5432/gh_social"
+            
+    # Mask password for secure logging
+    try:
+        parsed = urlparse(local_url)
+        masked_local = f"{parsed.scheme}://{parsed.username or ''}@{parsed.hostname or 'localhost'}:{parsed.port or 5432}{parsed.path}"
+    except Exception:
+        masked_local = "local PostgreSQL"
+
+    logger.info(f"Connecting to Local PostgreSQL: {masked_local}")
     local_db = PostgreSQLConnector(database_url=local_url)
     if not local_db.verify_connection():
         logger.error("Failed to connect to local database.")
         return
         
     # 2. Connect to Supabase
-    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_url = os.getenv("SUPABASE_DATABASE_URL") or os.getenv("SUPABASE_DB_URL")
     if not supabase_url:
-        logger.error("SUPABASE_URL environment variable is not set.")
+        # Fall back to DATABASE_URL if it points to Supabase
+        db_url = os.getenv("DATABASE_URL")
+        is_supabase = False
+        if db_url:
+            try:
+                hostname = urlparse(db_url).hostname or ""
+                is_supabase = bool(_SUPABASE_HOST_RE.search(hostname))
+            except Exception:
+                pass
+        if is_supabase:
+            supabase_url = db_url
+            
+    if not supabase_url:
+        logger.error("Neither SUPABASE_DATABASE_URL nor a Supabase DATABASE_URL environment variable is set.")
         return
-    logger.info("Connecting to Supabase PostgreSQL...")
+        
+    try:
+        parsed = urlparse(supabase_url)
+        masked_sb = f"{parsed.scheme}://{parsed.username or ''}@{parsed.hostname or ''}:{parsed.port or 6543}{parsed.path}"
+    except Exception:
+        masked_sb = "Supabase PostgreSQL"
+        
+    logger.info(f"Connecting to Supabase PostgreSQL: {masked_sb}")
     supabase_db = PostgreSQLConnector(database_url=supabase_url)
     if not supabase_db.verify_connection():
         logger.error("Failed to connect to Supabase database.")

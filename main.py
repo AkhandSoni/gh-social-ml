@@ -322,6 +322,7 @@ if __name__ == "__main__":
         # Load existing repos to filter out duplicates in run_acquisition
         existing_repos = set()
         if db.enabled:
+            conn = None
             try:
                 conn = db.connect()
                 cursor = conn.cursor()
@@ -330,6 +331,12 @@ if __name__ == "__main__":
                 logger.info(f"Loaded {len(existing_repos)} existing repository names from database.")
             except Exception as e:
                 logger.warning(f"Could not fetch existing repository names: {e}")
+            finally:
+                if conn:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
 
         enriched = run_acquisition(token, limit=fetch_limit, batch_size=args.batch_size, existing_repos=existing_repos)
         kept, dropped = filter_enriched(enriched, min_readme_chars=args.min_readme_chars)

@@ -150,7 +150,7 @@ class CandidateRetriever:
 
         # ── Determine channel quotas ─────────────────────────────────────
         semantic_quota = SEMANTIC_LIMIT if user_embedding is not None else 0
-        trending_quota = TOTAL_CANDIDATE_POOL - semantic_quota
+        trending_quota = min(TOTAL_CANDIDATE_POOL - semantic_quota, TRENDING_LIMIT)
 
         logger.info(
             "Retrieval quotas — Semantic: %d, Trending: %d (total target: %d)",
