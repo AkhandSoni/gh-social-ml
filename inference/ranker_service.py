@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
-import joblib
+import json
 import os
 
 class MMoEHeavyRanker(nn.Module):
@@ -68,7 +68,7 @@ def calculate_match_score(user_interests_skills, repo_languages, repo_topics, re
     return matches / len(user_interests_skills)
 
 class RankerService:
-    def __init__(self, model_path="heavy_ranker.pt", scaler_path="feature_scaler.pkl", emb_dim=384):
+    def __init__(self, model_path="heavy_ranker.pt", scaler_path="feature_scaler.json", emb_dim=384):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.emb_dim = emb_dim
         
@@ -84,13 +84,15 @@ class RankerService:
             print(f"⚠️ WARNING: {model_path} not found. Running with untrained weights for demo.")
         self.model.eval()
             
-        # Load Scaler
+        # Load Scaler safely from JSON
         if os.path.exists(scaler_path):
-            self.scaler = joblib.load(scaler_path)
-            print("✅ Feature Scaler loaded successfully.")
+            with open(scaler_path, 'r') as f:
+                scaler_params = json.load(f)
+            self.scaler_mean = np.array(scaler_params['mean'], dtype=np.float32)
+            self.scaler_scale = np.array(scaler_params['scale'], dtype=np.float32)
+            print("✅ Feature Scaler JSON loaded successfully.")
         else:
-            self.scaler = None
-            print(f"⚠️ WARNING: {scaler_path} not found. Dense features won't be scaled.")
+            raise RuntimeError(f"❌ ERROR: {scaler_path} not found! Refusing to start with unscaled features which corrupt predictions.")
 
     def score_batch(self, user_embedding, user_skills, candidate_repos):
         """
@@ -127,8 +129,8 @@ class RankerService:
         dense_features = np.array(dense_features)
         unscaled_features = dense_features.copy()
         
-        if self.scaler:
-            dense_features = self.scaler.transform(dense_features)
+        # Manually apply StandardScaler math
+        dense_features = (dense_features - self.scaler_mean) / self.scaler_scale
             
         # Concatenate into massive input tensor
         X = np.hstack((user_embs, repo_embs, dense_features))
@@ -162,6 +164,8 @@ class RankerService:
                 "predictions": {
                     "p_ctr": float(p_ctr[i]),
                     "p_save": float(p_save[i]),
+                    "p_gh": float(p_gh[i]),
+                    "pred_dwell_fraction": float(p_dwell[i]), # Multiply by 600 to get seconds
                     "p_follow": float(p_fol[i])
                 }
             })

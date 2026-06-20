@@ -39,7 +39,7 @@ The MMoE architecture routes the 778-dim input through 4 Shared Experts, and out
 2. `Save Probability` (Binary Classification -> Sigmoid, 0.0 to 1.0)
 3. `GitHub Open Probability` (Binary Classification -> Sigmoid, 0.0 to 1.0)
 4. `Follow Probability` (Binary Classification -> Sigmoid, 0.0 to 1.0)
-5. `Dwell Time` (Regression -> ReLU, continuous seconds)
+5. `Dwell Time` (Regression -> ReLU, normalized fraction 0.0 to 1.0, where 1.0 = 600s)
 
 ## 4. The Value Function (Final Ranking)
 The 5 outputs are fed into a hard-coded algebraic equation in the backend to calculate the final rank `Score`. The 150 candidate repos are sorted descending by this score before being chopped into batches of 15 for the frontend.
