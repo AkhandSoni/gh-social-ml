@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 logger = logging.getLogger("pipeline.acquisition")
@@ -12,8 +14,9 @@ logger = logging.getLogger("pipeline.acquisition")
 def run_acquisition(
     token: str,
     *,
-    limit: int = 100,
-    batch_size: int = 10,
+    limit: int = 150,
+    batch_size: int = 15,
+    workers: int = 4,
     existing_repos: set[str] | None = None,
 ) -> list[Any]:
     """
@@ -27,6 +30,10 @@ def run_acquisition(
       .topics           — list[str]
       .languages        — dict[str, int]  (language → bytes)
     """
+    # Clamp workers so ThreadPoolExecutor never receives 0 or a negative value,
+    # which would raise ValueError even when called outside of the CLI.
+    workers = max(1, workers)
+
     from acquisition.github_graphql_client import GitHubGraphQLClient
     from acquisition.github_discovery import GitHubDiscoveryEngine, DiscoveryConfig
     from acquisition.repository_enricher import RepositoryEnricher
@@ -56,32 +63,55 @@ def run_acquisition(
         )
         discovered = new_discovered
 
-    # ── Step 2: Enrichment in batches ─────────────────────────────────────────
-    logger.info("Enriching in batches of %d …", batch_size)
+    # ── Step 2: Concurrent enrichment ─────────────────────────────────────────
+    targets = discovered[:limit]
+    batches = [targets[i : i + batch_size] for i in range(0, len(targets), batch_size)]
+    logger.info(
+        "Enriching %d repos in %d batch(es) of up to %d with %d concurrent worker(s) …",
+        len(targets), len(batches), batch_size, workers,
+    )
     enriched: list = []
-    targets       = discovered[:limit]
-    total_batches = (len(targets) + batch_size - 1) // batch_size
 
-    for i in range(total_batches):
-        batch = targets[i * batch_size : (i + 1) * batch_size]
-        try:
-            results = enricher.get_repositories_batch(batch)
-            enriched.extend(results)
-            logger.info(
-                "  Batch %d/%d → +%d enriched  (total: %d)",
-                i + 1, total_batches, len(results), len(enriched),
+    # Each worker thread gets its own GitHubGraphQLClient (and requests.Session)
+    # so concurrent threads never race on a shared Session object.
+    _thread_local = threading.local()
+
+    def _get_thread_enricher() -> "RepositoryEnricher":
+        if not hasattr(_thread_local, "enricher"):
+            from acquisition.github_graphql_client import GitHubGraphQLClient
+            from acquisition.repository_enricher import RepositoryEnricher
+            _thread_local.enricher = RepositoryEnricher(
+                graphql_client=GitHubGraphQLClient(token=token)
             )
-        except Exception as exc:
-            logger.warning("  Batch %d failed (%s). Falling back to one-by-one …", i + 1, exc)
-            for repo in batch:
-                full_name = repo if isinstance(repo, str) else repo.get("full_name", "")
-                try:
-                    r = enricher.enrich(full_name)
-                    if r:
-                        enriched.append(r)
-                        logger.info("    ✓  %s", full_name)
-                except Exception as exc2:
-                    logger.warning("    ✗  %s: %s", full_name, exc2)
+        return _thread_local.enricher
+
+    def _enrich_batch(batch: list[Any]) -> list[Any]:
+        # get_repositories_batch() uses a two-pass approach: lean metadata first,
+        # README fetched separately. A README failure only produces empty README
+        # data; the repo is still kept, not dropped entirely.
+        return _get_thread_enricher().get_repositories_batch(batch)
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        # Each future processes one batch of batch_size repos. workers controls
+        # how many batches run concurrently; batch_size controls the GraphQL
+        # request payload size. Both levers are now effective.
+        futures = {
+            executor.submit(_enrich_batch, batch): (i + 1, batch)
+            for i, batch in enumerate(batches)
+        }
+        for future in as_completed(futures):
+            batch_num, batch = futures[future]
+            try:
+                results = future.result()
+                enriched.extend(results)
+                logger.info(
+                    "  Batch %d/%d → +%d enriched  (total: %d)",
+                    batch_num, len(batches), len(results), len(enriched),
+                )
+            except Exception as exc:
+                logger.warning("  Batch %d/%d failed: %s", batch_num, len(batches), exc)
+
 
     logger.info("Acquisition complete — %d / %d repos enriched", len(enriched), limit)
     return enriched
+
