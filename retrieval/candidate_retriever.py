@@ -498,7 +498,6 @@ class CandidateRetriever:
                     "On-the-fly embedded %d trending repo(s) with no Qdrant vector.",
                     len(needs_embedding),
                 )
-                self._persist_on_the_fly_embeddings([entry for _, entry in needs_embedding])
             except Exception as exc:
                 logger.warning(
                     "On-the-fly embedding failed (%s). "
@@ -506,9 +505,14 @@ class CandidateRetriever:
                     exc, len(needs_embedding),
                 )
                 for _, entry in needs_embedding:
-                    if entry["repo_embedding"] is None:
+                    if entry.get("repo_embedding") is None:
                         entry["repo_embedding"] = [0.0] * EMBEDDING_DIM
                         entry["embedding_source"] = "zero_fallback"
+            
+            # Persist successful on-the-fly embeddings
+            successful_embeddings = [entry for _, entry in needs_embedding if entry.get("embedding_source") == "on_the_fly"]
+            if successful_embeddings:
+                self._persist_on_the_fly_embeddings(successful_embeddings)
 
         return hydrated
 

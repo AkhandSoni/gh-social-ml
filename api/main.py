@@ -18,9 +18,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("pipeline.api")
 
-# ── Shared-secret guard ──────────────────────────────────────────────────────
-_INTERNAL_SECRET = os.getenv("INTERNAL_API_SECRET")
+import hmac
 
+# ── Shared-secret guard ──────────────────────────────────────────────────────
 
 async def require_internal_secret(
     x_internal_secret: str | None = Header(default=None, alias="x-internal-secret"),
@@ -30,16 +30,18 @@ async def require_internal_secret(
     Fails closed (503) if INTERNAL_API_SECRET is not configured on this server
     so a misconfigured deploy is never accidentally open.
     """
-    if not _INTERNAL_SECRET:
+    internal_secret = os.getenv("INTERNAL_API_SECRET")
+    if not internal_secret:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Internal API secret is not configured on this server.",
         )
-    if x_internal_secret != _INTERNAL_SECRET:
+    if not x_internal_secret or not hmac.compare_digest(x_internal_secret.encode("utf-8"), internal_secret.encode("utf-8")):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Unauthorized: invalid or missing X-Internal-Secret header.",
         )
+
 
 # Global instances
 producer: FeedbackProducer | None = None
