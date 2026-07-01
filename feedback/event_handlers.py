@@ -180,6 +180,7 @@ class FeedbackHandler:
             logger.error("Forbidden database column update: '%s'", column)
             return False
 
+        conn = None
         try:
             conn = self.db._get_connection()
             cursor = conn.cursor()
