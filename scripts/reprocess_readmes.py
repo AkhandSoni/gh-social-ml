@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from database import PostgreSQLConnector
-from utils.gemma_client import generate_readme_markdown
+from utils.groq_client import generate_readme_markdown
 
 def main():
     print("🚀 Starting Reprocess READMEs Test Script...")
