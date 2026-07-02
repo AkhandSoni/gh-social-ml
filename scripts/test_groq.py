@@ -26,23 +26,28 @@ def main():
         print("Please add 'GROQ_API_KEY=your_key_here' to your .env file.")
         return
 
-    # 2. Retrieve langflow description/summary from Supabase
+    # 2. Retrieve repository description/summary from Supabase
+    target_repo = sys.argv[1] if len(sys.argv) > 1 else "FunAudioLLM/CosyVoice"
+    
     db = PostgreSQLConnector()
     if not db.enabled or not db.verify_connection():
         print("❌ Error: Could not connect to database.")
         return
 
-    print("Fetching 'langflow-ai/langflow' description from Supabase...")
+    print(f"Fetching '{target_repo}' description from Supabase...")
     conn = db.connect()
     cursor = conn.cursor()
-    cursor.execute("SELECT description, readme_summary FROM Repo WHERE full_name = 'langflow-ai/langflow';")
+    cursor.execute(
+        "SELECT description, readme_summary FROM Repo WHERE full_name = %s OR repo_name = %s LIMIT 1;",
+        (target_repo, target_repo)
+    )
     row = cursor.fetchone()
     cursor.close()
     conn.close()
 
     if not row:
-        print("❌ Error: langflow repo not found in database. Using default fallback description.")
-        raw_text = "Langflow is a powerful, low-code interface for building RAG applications and AI agents."
+        print(f"❌ Error: Repository '{target_repo}' not found in database. Using fallback description.")
+        raw_text = f"Repository {target_repo} is a high-quality open-source project."
     else:
         description, readme_summary = row
         raw_text = readme_summary or description
