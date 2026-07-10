@@ -1,4 +1,5 @@
 import logging
+import os
 import uuid
 import numpy as np
 import math
@@ -18,24 +19,16 @@ from config import (
     DWELL_BASE_ALPHA,
 )
 from scripts.user_onboarding import USER_PROFILES_COLLECTION, TARGET_VECTOR_NAME
+from .interactions import get_interaction, normalize_interaction
+from .storage import FeedbackStore
 
 logger = logging.getLogger("pipeline.feedback")
 
 # Action-weights for vector adjustment (learning rate \alpha)
-ACTION_WEIGHTS = {
-    "click": 0.05,
-    "like": 0.15,
-    "save": 0.20,
-    "skip": -0.10,
-    "dwell": None,   # dynamic: computed by _dwell_alpha(dwell_seconds)
-}
 
 # PostgreSQL column mapping for repository engagement stats.
 # "dwell" maps to None — it only updates the Qdrant embedding, not a Postgres counter.
 METRIC_COLUMNS = {
-    "click": "views_count",
-    "like": "likes_count",
-    "save": "saves_count",
     "dwell": None,   # no Postgres column — embedding-only signal
 }
 
@@ -84,10 +77,19 @@ class FeedbackHandler:
         qdrant_api_key: str | None = None,
     ) -> None:
         self.db = db_connector or PostgreSQLConnector()
+        self.store = FeedbackStore(self.db)
         self.qdrant_url = qdrant_url or QDRANT_URL
         self.qdrant_api_key = qdrant_api_key or QDRANT_API_KEY
 
         self._qdrant_client: QdrantClient | None = None
+        self.redis_client = None
+        redis_url = os.getenv("REDIS_URL")
+        if redis_url:
+            try:
+                import redis
+                self.redis_client = redis.from_url(redis_url, decode_responses=True)
+            except Exception as exc:
+                logger.warning("Redis cache invalidation is unavailable: %s", exc)
         if self.qdrant_url:
             try:
                 self._qdrant_client = QdrantClient(
@@ -120,10 +122,14 @@ class FeedbackHandler:
         dwell_seconds : Required when action == 'dwell'. Observed time the user
                         spent on the repository card, in seconds.
         """
-        action = action.lower()
-        if action not in ACTION_WEIGHTS:
-            logger.error("Unknown feedback action: %s", action)
-            return False
+        action = normalize_interaction(action)
+        interaction = None
+        if action != "dwell":
+            try:
+                interaction = get_interaction(action)
+            except ValueError:
+                logger.error("Unknown feedback action: %s", action)
+                return False
 
         # Resolve the embedding learning rate (alpha) for this event.
         if action == "dwell":
@@ -143,7 +149,7 @@ class FeedbackHandler:
                 )
                 return True   # not an error — just a no-op
         else:
-            resolved_alpha = ACTION_WEIGHTS[action]
+            resolved_alpha = interaction.embedding_alpha
 
         logger.info(
             "Processing feedback: User '%s' -> Repo '%s' [%s] alpha=%.4f",
@@ -152,12 +158,26 @@ class FeedbackHandler:
         )
 
         # 1. Update PostgreSQL engagement counts (dwell has no column — no-op)
-        db_success = self.update_postgres_metrics(repo_id, action)
+        db_success = True
+        if action != "dwell":
+            try:
+                if interaction.clears_feedback:
+                    self.store.delete(user_id, repo_id)
+                else:
+                    self.store.record(user_id, repo_id, action, interaction.feedback_score)
+            except Exception as exc:
+                logger.error("Failed to persist feedback: %s", exc)
+                db_success = False
+        db_success = self.update_postgres_metrics(repo_id, action) and db_success
         if not db_success:
             logger.warning("Failed to update engagement metrics in Postgres for '%s'", repo_id)
 
         # 2. Update Qdrant user embedding vector using the resolved alpha
-        qdrant_success = self.update_user_embedding(user_id, repo_id, resolved_alpha)
+        qdrant_success = (
+            True
+            if resolved_alpha == 0.0
+            else self.update_user_embedding(user_id, repo_id, resolved_alpha)
+        )
         if not qdrant_success:
             logger.warning("Failed to adjust Qdrant profile embedding for user '%s'", user_id)
 
@@ -170,7 +190,13 @@ class FeedbackHandler:
 
     def update_postgres_metrics(self, repo_id: str, action: str) -> bool:
         """Increment the metric count inside the Repo PostgreSQL table."""
-        column = METRIC_COLUMNS.get(action)
+        if action == "dwell":
+            column = None
+        else:
+            try:
+                column = get_interaction(action).metric_column
+            except ValueError:
+                column = None
         if column is None or not self.db.enabled:
             # 'skip' and 'dwell' have no Postgres counter — treat as success
             return True
@@ -182,7 +208,7 @@ class FeedbackHandler:
 
         conn = None
         try:
-            conn = self.db._get_connection()
+            conn = self.db.connect()
             cursor = conn.cursor()
 
             # Increment count defensively handling NULL values using COALESCE
@@ -214,7 +240,7 @@ class FeedbackHandler:
             return repo_id
         conn = None
         try:
-            conn = self.db._get_connection()
+            conn = self.db.connect()
             cursor = conn.cursor()
             cursor.execute("SELECT full_name FROM repo WHERE repo_id::text = %s", (repo_id,))
             row = cursor.fetchone()
@@ -331,13 +357,21 @@ class FeedbackHandler:
             return False
 
     def invalidate_user_feed_cache(self, user_id: str) -> bool:
-        """Invalidate the cached recommendation batches for this user in PostgreSQL."""
+        """Invalidate persisted batches and the backend Redis delivery queue."""
+        redis_success = True
+        if self.redis_client:
+            try:
+                self.redis_client.delete(f"user:{user_id}:delivery_queue")
+            except Exception as exc:
+                logger.error("Failed to invalidate Redis feed for '%s': %s", user_id, exc)
+                redis_success = False
+
         if not self.db.enabled:
-            return True
+            return redis_success
 
         conn = None
         try:
-            conn = self.db._get_connection()
+            conn = self.db.connect()
             cursor = conn.cursor()
 
             # Delete cache row for user
@@ -346,7 +380,7 @@ class FeedbackHandler:
             conn.commit()
 
             logger.info("Invalidated recommendation cache for user '%s'", user_id)
-            return True
+            return redis_success
         except Exception as exc:
             logger.error("Failed to delete cache in PostgreSQL for user '%s': %s", user_id, exc)
             if conn:
