@@ -149,31 +149,38 @@ class FeedbackHandler:
                 )
                 return True   # not an error — just a no-op
         else:
-            resolved_alpha = interaction.embedding_alpha
-
-        logger.info(
-            "Processing feedback: User '%s' -> Repo '%s' [%s] alpha=%.4f",
-            user_id, repo_id, action,
-            resolved_alpha if resolved_alpha is not None else 0.0,
-        )
+            resolved_alpha = 0.0
 
         # 1. Update PostgreSQL engagement counts (dwell has no column — no-op)
         db_success = True
+        state_changed = action == "dwell" and resolved_alpha != 0.0
         if action != "dwell":
             try:
                 if not interaction.persists_feedback:
-                    pass
+                    resolved_alpha = interaction.embedding_alpha
+                    state_changed = resolved_alpha != 0.0
                 elif interaction.clears_interaction_type:
-                    self.store.delete(
+                    deleted = self.store.delete(
                         user_id,
                         repo_id,
                         interaction_type=interaction.clears_interaction_type,
                     )
+                    state_changed = deleted
+                    if deleted:
+                        cleared = get_interaction(interaction.clears_interaction_type)
+                        resolved_alpha = -cleared.embedding_alpha
                 else:
-                    self.store.record(user_id, repo_id, action, interaction.feedback_score)
+                    record = self.store.record(user_id, repo_id, action, interaction.feedback_score)
+                    state_changed = record is not None
+                    if state_changed:
+                        resolved_alpha = interaction.embedding_alpha
             except Exception as exc:
                 logger.error("Failed to persist feedback: %s", exc)
                 db_success = False
+        logger.info(
+            "Processing feedback: User '%s' -> Repo '%s' [%s] alpha=%.4f changed=%s",
+            user_id, repo_id, action, resolved_alpha, state_changed,
+        )
         db_success = self.update_postgres_metrics(repo_id, action) and db_success
         if not db_success:
             logger.warning("Failed to update engagement metrics in Postgres for '%s'", repo_id)
@@ -181,7 +188,7 @@ class FeedbackHandler:
         # 2. Update Qdrant user embedding vector using the resolved alpha
         qdrant_success = (
             True
-            if resolved_alpha == 0.0
+            if not state_changed or resolved_alpha == 0.0
             else self.update_user_embedding(user_id, repo_id, resolved_alpha)
         )
         if not qdrant_success:

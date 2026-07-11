@@ -35,7 +35,7 @@ def test_initial_feedback_weights_are_centralized_and_bounded():
     )
 
 
-def test_feedback_adjustment_is_bounded_and_resorts_candidates():
+def test_positive_feedback_exact_match_is_treated_as_consumed():
     candidates = [
         {"full_name": "org/a", "final_score": 10.0},
         {"full_name": "org/b", "final_score": 9.0},
@@ -43,10 +43,7 @@ def test_feedback_adjustment_is_bounded_and_resorts_candidates():
 
     ranked = apply_feedback_scores(candidates, {"org/b": 0.8})
 
-    assert ranked[0]["full_name"] == "org/b"
-    assert ranked[0]["feedback_adjustment"] == pytest.approx(2.0)
-    assert ranked[0]["final_score"] == pytest.approx(11.0)
-    assert ranked[1]["final_score"] == pytest.approx(10.0)
+    assert [item["full_name"] for item in ranked] == ["org/a"]
 
 
 def test_explicit_dislike_filters_exact_repository():
@@ -79,3 +76,17 @@ def test_feedback_delete_can_target_only_one_interaction_type():
     sql, params = mock_cursor.execute.call_args_list[-1][0]
     assert "interaction_type = %s" in sql
     assert params == (USER_UUID, "org/repo", "org/repo", "like", "like")
+
+
+def test_scores_for_user_aggregates_independent_states_with_cap():
+    store = FeedbackStore(MagicMock(enabled=False))
+    store.list_for_user = MagicMock(return_value=[
+        MagicMock(repo_id="org/repo", feedback_score=1.0),
+        MagicMock(repo_id="org/repo", feedback_score=0.8),
+        MagicMock(repo_id="org/negative", feedback_score=-1.0),
+    ])
+
+    assert store.scores_for_user(USER_UUID) == {
+        "org/repo": 1.0,
+        "org/negative": -1.0,
+    }

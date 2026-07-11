@@ -14,6 +14,40 @@ from feedback.consumer import FeedbackConsumer
 USER_UUID = "123e4567-e89b-12d3-a456-426614174000"
 
 
+class _MemoryFeedbackStore:
+    def __init__(self) -> None:
+        self.active: set[tuple[str, str, str]] = set()
+
+    def record(self, user_id: str, repo_id: str, interaction_type: str, feedback_score: float):
+        key = (user_id, repo_id, interaction_type)
+        if key in self.active:
+            return None
+        self.active.add(key)
+        return object()
+
+    def delete(self, user_id: str, repo_id: str, *, interaction_type: str | None = None) -> bool:
+        key = (user_id, repo_id, interaction_type or "")
+        if key not in self.active:
+            return False
+        self.active.remove(key)
+        return True
+
+
+def _transition_handler() -> FeedbackHandler:
+    mock_db = MagicMock()
+    mock_db.enabled = False
+    handler = FeedbackHandler(db_connector=mock_db)
+    handler.store = _MemoryFeedbackStore()
+    handler.update_postgres_metrics = MagicMock(return_value=True)
+    handler.invalidate_user_feed_cache = MagicMock(return_value=True)
+    handler.update_user_embedding = MagicMock(return_value=True)
+    return handler
+
+
+def _embedding_alphas(handler: FeedbackHandler) -> list[float]:
+    return [call.args[2] for call in handler.update_user_embedding.call_args_list]
+
+
 def test_shift_vector_math():
     """Verify the vector shifting formula: User' + alpha * Repo, normalized to 1."""
     user_vec = [1.0, 0.0]
@@ -281,8 +315,10 @@ def test_clear_actions_only_delete_the_matching_positive_signal():
     with patch("feedback.event_handlers.QdrantClient"):
         handler = FeedbackHandler(db_connector=mock_db, qdrant_url="http://localhost:6333")
     handler.store = MagicMock()
+    handler.store.delete.return_value = True
     handler.update_postgres_metrics = MagicMock(return_value=True)
     handler.invalidate_user_feed_cache = MagicMock(return_value=True)
+    handler.update_user_embedding = MagicMock(return_value=True)
 
     assert handler.handle_feedback(USER_UUID, "facebook/react", "unlike") is True
     handler.store.delete.assert_called_once_with(
@@ -300,8 +336,10 @@ def test_undislike_only_clears_dislike_signal():
     with patch("feedback.event_handlers.QdrantClient"):
         handler = FeedbackHandler(db_connector=mock_db, qdrant_url="http://localhost:6333")
     handler.store = MagicMock()
+    handler.store.delete.return_value = True
     handler.update_postgres_metrics = MagicMock(return_value=True)
     handler.invalidate_user_feed_cache = MagicMock(return_value=True)
+    handler.update_user_embedding = MagicMock(return_value=True)
 
     assert handler.handle_feedback(USER_UUID, "facebook/react", "undislike") is True
     handler.store.delete.assert_called_once_with(
@@ -325,6 +363,84 @@ def test_impression_does_not_create_effective_feedback():
     assert handler.handle_feedback(USER_UUID, "facebook/react", "impression") is True
     handler.store.record.assert_not_called()
     handler.store.delete.assert_not_called()
+
+
+def test_like_and_save_are_independent_states_in_any_order():
+    for first, second in (("like", "save"), ("save", "like")):
+        handler = _transition_handler()
+
+        assert handler.handle_feedback(USER_UUID, "facebook/react", first) is True
+        assert handler.handle_feedback(USER_UUID, "facebook/react", second) is True
+
+        assert handler.store.active == {
+            (USER_UUID, "facebook/react", "like"),
+            (USER_UUID, "facebook/react", "save"),
+        }
+        assert sorted(_embedding_alphas(handler)) == [0.15, 0.2]
+
+
+def test_unsave_preserves_like_and_unlike_preserves_save():
+    handler = _transition_handler()
+    for action in ("like", "save", "unsave"):
+        assert handler.handle_feedback(USER_UUID, "facebook/react", action) is True
+
+    assert handler.store.active == {(USER_UUID, "facebook/react", "like")}
+    assert _embedding_alphas(handler) == [0.15, 0.2, -0.2]
+
+    handler = _transition_handler()
+    for action in ("save", "like", "unlike"):
+        assert handler.handle_feedback(USER_UUID, "facebook/react", action) is True
+
+    assert handler.store.active == {(USER_UUID, "facebook/react", "save")}
+    assert _embedding_alphas(handler) == [0.2, 0.15, -0.15]
+
+
+def test_replaying_identical_state_events_does_not_shift_twice():
+    handler = _transition_handler()
+
+    for action in ("like", "like", "save", "save"):
+        assert handler.handle_feedback(USER_UUID, "facebook/react", action) is True
+
+    assert handler.store.active == {
+        (USER_UUID, "facebook/react", "like"),
+        (USER_UUID, "facebook/react", "save"),
+    }
+    assert _embedding_alphas(handler) == [0.15, 0.2]
+
+
+def test_undo_actions_apply_inverse_delta_once():
+    cases = [
+        ("like", "unlike", [0.15, -0.15]),
+        ("save", "unsave", [0.2, -0.2]),
+        ("dislike", "undislike", [-0.15, 0.15]),
+    ]
+
+    for action, undo_action, expected_alphas in cases:
+        handler = _transition_handler()
+
+        assert handler.handle_feedback(USER_UUID, "facebook/react", action) is True
+        assert handler.handle_feedback(USER_UUID, "facebook/react", undo_action) is True
+        assert handler.handle_feedback(USER_UUID, "facebook/react", undo_action) is True
+
+        assert handler.store.active == set()
+        assert _embedding_alphas(handler) == expected_alphas
+
+
+def test_like_save_dislike_state_transitions_do_not_clear_each_other():
+    actions = ("like", "save", "dislike")
+    for first in actions:
+        for second in actions:
+            if first == second:
+                continue
+            handler = _transition_handler()
+
+            assert handler.handle_feedback(USER_UUID, "facebook/react", first) is True
+            assert handler.handle_feedback(USER_UUID, "facebook/react", second) is True
+
+            assert handler.store.active == {
+                (USER_UUID, "facebook/react", first),
+                (USER_UUID, "facebook/react", second),
+            }
 
 
 @pytest.mark.anyio

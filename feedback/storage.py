@@ -26,7 +26,12 @@ class FeedbackRecord:
 
 
 class FeedbackStore:
-    """Persistent effective feedback, one row per user/repository pair."""
+    """Persistent effective feedback state.
+
+    Each row represents one current state bit for a user/repository/action. This
+    allows a repository to be liked and saved at the same time while keeping
+    each state transition idempotent.
+    """
 
     def __init__(self, db_connector: PostgreSQLConnector | None = None) -> None:
         self.db = db_connector or PostgreSQLConnector()
@@ -45,10 +50,39 @@ class FeedbackStore:
                 feedback_score DOUBLE PRECISION NOT NULL
                     CHECK (feedback_score >= -1.0 AND feedback_score <= 1.0),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (user_id, repo_id)
+                PRIMARY KEY (user_id, repo_id, interaction_type)
             );
             CREATE INDEX IF NOT EXISTS user_feedback_user_updated_idx
                 ON user_feedback (user_id, updated_at DESC);
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conrelid = 'user_feedback'::regclass
+                      AND conname = 'user_feedback_pkey'
+                      AND (
+                          SELECT array_agg(a.attname ORDER BY k.ordinality)
+                          FROM unnest(conkey) WITH ORDINALITY AS k(attnum, ordinality)
+                          JOIN pg_attribute a
+                            ON a.attrelid = conrelid
+                           AND a.attnum = k.attnum
+                      ) IS DISTINCT FROM ARRAY['user_id', 'repo_id', 'interaction_type']
+                ) THEN
+                    ALTER TABLE user_feedback DROP CONSTRAINT user_feedback_pkey;
+                END IF;
+
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conrelid = 'user_feedback'::regclass
+                      AND conname = 'user_feedback_pkey'
+                ) THEN
+                    ALTER TABLE user_feedback
+                    ADD CONSTRAINT user_feedback_pkey
+                    PRIMARY KEY (user_id, repo_id, interaction_type);
+                END IF;
+            END $$;
             """
         )
         conn.commit()
@@ -77,22 +111,34 @@ class FeedbackStore:
             SELECT %s::uuid, repo_id, %s, %s, CURRENT_TIMESTAMP
             FROM repo
             WHERE repo_id::text = %s OR full_name = %s
-            ON CONFLICT (user_id, repo_id) DO UPDATE SET
-                interaction_type = EXCLUDED.interaction_type,
+            ON CONFLICT (user_id, repo_id, interaction_type) DO UPDATE SET
                 feedback_score = EXCLUDED.feedback_score,
                 updated_at = CURRENT_TIMESTAMP
+            WHERE user_feedback.feedback_score IS DISTINCT FROM EXCLUDED.feedback_score
             RETURNING user_id::text, repo_id::text, interaction_type,
                       feedback_score, updated_at;
             """,
             (user_id, interaction_type, feedback_score, repo_id, repo_id),
         )
         row = cursor.fetchone()
+        if row is None:
+            cursor.execute(
+                """
+                SELECT 1 FROM repo
+                WHERE repo_id::text = %s OR full_name = %s
+                LIMIT 1;
+                """,
+                (repo_id, repo_id),
+            )
+            if not cursor.fetchone():
+                conn.commit()
+                raise ValueError(f"Repository not found: {repo_id}")
+            conn.commit()
+            return None
         conn.commit()
-        if not row:
-            raise ValueError(f"Repository not found: {repo_id}")
         if not isinstance(row, (tuple, list)):
             # Some unit-test database doubles do not model RETURNING rows.
-            return None
+            return FeedbackRecord(user_id, repo_id, interaction_type, feedback_score)
         return FeedbackRecord(*row)
 
     def delete(
@@ -145,7 +191,13 @@ class FeedbackStore:
         return [FeedbackRecord(*row) for row in cursor.fetchall()]
 
     def scores_for_user(self, user_id: str) -> dict[str, float]:
-        return {record.repo_id: record.feedback_score for record in self.list_for_user(user_id)}
+        scores: dict[str, float] = {}
+        for record in self.list_for_user(user_id):
+            scores[record.repo_id] = max(
+                -1.0,
+                min(1.0, scores.get(record.repo_id, 0.0) + record.feedback_score),
+            )
+        return scores
 
 
 def apply_feedback_scores(
@@ -155,12 +207,19 @@ def apply_feedback_scores(
     max_adjustment: float = 2.5,
     dislike_filter_threshold: float = -0.9,
 ) -> list[dict[str, Any]]:
-    """Apply a bounded explicit-feedback signal without replacing base ranking."""
+    """Apply effective feedback without promoting already-consumed exact repos.
+
+    Explicit dislikes remove exact matches. Positive feedback is treated as a
+    consumed/seen signal here; it should inform candidate generation for similar
+    unseen repositories, not boost the same repository back into the feed.
+    """
     adjusted: list[dict[str, Any]] = []
     for candidate in candidates:
         identity = str(candidate.get("full_name") or candidate.get("repo_id") or "")
         score = feedback_by_repo.get(identity, 0.0)
         if score <= dislike_filter_threshold:
+            continue
+        if score > 0.0:
             continue
         item = dict(candidate)
         adjustment = max(-max_adjustment, min(max_adjustment, score * max_adjustment))
