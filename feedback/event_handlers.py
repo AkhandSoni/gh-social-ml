@@ -215,7 +215,7 @@ class FeedbackHandler:
                 except Exception as exc:
                     # Marker Read Failure Replays Delta fix: Fail closed until the marker can be read.
                     logger.error("Transient Redis error while reading replay marker. Failing closed.")
-                    raise exc
+                    return False
                     
             if state_changed and resolved_alpha != 0.0:
                 if cache_success and db_success:
@@ -290,7 +290,7 @@ class FeedbackHandler:
                                             self.redis_client.lpush("qdrant_rollback_dlq", dlq_payload)
                                         except Exception:
                                             pass
-                        raise exc
+                        return False
                 else:
                     conn.rollback()
 
@@ -301,7 +301,7 @@ class FeedbackHandler:
                     conn.rollback()
                 except Exception:
                     pass
-            raise
+            return False
 
     def update_postgres_metrics(self, repo_id: str, action: str, conn=None) -> bool:
         """Increment the metric count inside the Repo PostgreSQL table."""

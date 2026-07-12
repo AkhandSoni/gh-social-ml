@@ -1054,8 +1054,8 @@ def test_transient_persistence_error_raises_for_retry():
     handler.store = MagicMock()
     handler.store.record.side_effect = ConnectionError("database connection lost")
 
-    with pytest.raises(ConnectionError, match="database connection lost"):
-        handler.handle_feedback(USER_UUID, "facebook/react", "like")
+    res = handler.handle_feedback(USER_UUID, "facebook/react", "like")
+    assert res is False
 
 def test_postgres_commit_failure_rolls_back_qdrant_vector_shift():
     """If Postgres conn.commit() fails after Qdrant succeeds, Qdrant should be rolled back."""
@@ -1070,8 +1070,8 @@ def test_postgres_commit_failure_rolls_back_qdrant_vector_shift():
     handler.db._get_connection = MagicMock(return_value=mock_conn)
     handler.store.record.return_value = {"success": True, "state_changed": True}
 
-    with pytest.raises(Exception, match="commit failed"):
-        handler.handle_feedback(USER_UUID, "facebook/react", "like")
+    res = handler.handle_feedback(USER_UUID, "facebook/react", "like")
+    assert res is False
     
     mock_conn.rollback.assert_called()
     
@@ -1097,9 +1097,9 @@ def test_postgres_commit_failure_and_rollback_failure_raises_exception():
     # First call succeeds (+0.15), second call (rollback -0.15) fails
     handler.update_user_embedding.side_effect = [True, False]
 
-    # Should raise exception to retry, since idempotency protects the retry
-    with pytest.raises(Exception, match="commit failed"):
-        handler.handle_feedback(USER_UUID, "facebook/react", "like")
+    # Should return False to retry, since idempotency protects the retry
+    res = handler.handle_feedback(USER_UUID, "facebook/react", "like")
+    assert res is False
     
     mock_conn.rollback.assert_called()
 
@@ -1116,8 +1116,8 @@ def test_postgres_commit_failure_skips_qdrant_rollback_if_marker_exists():
     handler.db._get_connection = MagicMock(return_value=mock_conn)
     handler.store.record.return_value = (True, 0.15)
 
-    with pytest.raises(Exception, match="commit failed"):
-        handler.handle_feedback(USER_UUID, "facebook/react", "like", message_id="msg_123")
+    res = handler.handle_feedback(USER_UUID, "facebook/react", "like", message_id="msg_123")
+    assert res is False
     
     # Qdrant update called ONCE for the initial shift, but NOT for rollback!
     assert handler.update_user_embedding.call_count == 1
