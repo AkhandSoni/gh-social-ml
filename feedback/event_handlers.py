@@ -215,12 +215,12 @@ class FeedbackHandler:
                     logger.warning("Failed to invalidate feed cache for user '%s'", user_id)
 
             if conn:
-                if db_success and qdrant_success and cache_success:
+                if db_success and qdrant_success:
                     conn.commit()
                 else:
                     conn.rollback()
 
-            return db_success and qdrant_success and cache_success
+            return db_success and qdrant_success
         except Exception:
             if conn:
                 conn.rollback()
