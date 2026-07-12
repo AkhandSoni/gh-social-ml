@@ -234,7 +234,7 @@ class FeedbackHandler:
                             except Exception as exc:
                                 logger.error("Failed to write Qdrant replay marker to Redis: %s", exc)
                         
-                        if qdrant_success and qdrant_applied_key and not marker_written:
+                        if qdrant_success and qdrant_applied_key and self.redis_client and not marker_written:
                             # We failed to write the marker!
                             # We CANNOT proceed to Postgres commit, because if Postgres fails, we can't protect the retry!
                             logger.warning("Rolling back Qdrant vector shift because replay marker could not be written.")
