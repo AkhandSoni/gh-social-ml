@@ -852,22 +852,6 @@ def test_share_shifts_embedding_without_persisting():
     # Should invalidate cache since alpha != 0
     handler.invalidate_user_feed_cache.assert_called_once_with(USER_UUID)
 
-
-def test_permanent_persistence_error_returns_true_not_retried():
-    """ValueError from store.record (e.g. unknown repo) should be treated as a
-    non-retryable no-op: handle_feedback returns True so the consumer acks."""
-    handler = _transition_handler()
-    handler.store = MagicMock()
-    handler.store.record.side_effect = ValueError("Repository not found: unknown/repo")
-
-    # Should succeed (no-op) — not block the queue
-    res = handler.handle_feedback(USER_UUID, "unknown/repo", "like")
-    assert res is True
-
-    # Embedding should NOT be shifted since state_changed stayed False
-    handler.update_user_embedding.assert_not_called()
-
-
 def test_transient_persistence_error_raises_for_retry():
     """ConnectionError from store.record should propagate so the consumer
     does NOT acknowledge the message and can retry later."""

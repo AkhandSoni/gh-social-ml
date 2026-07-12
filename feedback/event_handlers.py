@@ -179,11 +179,6 @@ class FeedbackHandler:
                         state_changed = record is not None
                         if state_changed:
                             resolved_alpha = interaction.embedding_alpha
-                except ValueError as exc:
-                    # Permanent failure (e.g. unknown repo, invalid score).
-                    # Retrying will never succeed — treat as a no-op so the
-                    # consumer can acknowledge the message instead of looping.
-                    logger.warning("Non-retryable persistence error (dropping event): %s", exc)
                 except Exception as exc:
                     # Transient / unexpected failure (DB connection, timeout).
                     # Re-raise so the consumer does NOT ack and can retry later.
@@ -198,29 +193,32 @@ class FeedbackHandler:
             if not db_success:
                 logger.warning("Failed to update engagement metrics in Postgres for '%s'", repo_id)
 
-            # 2. Update Qdrant user embedding vector using the resolved alpha
-            qdrant_success = (
-                True
-                if not state_changed or resolved_alpha == 0.0
-                else self.update_user_embedding(user_id, repo_id, resolved_alpha)
-            )
-            if not qdrant_success:
-                logger.warning("Failed to adjust Qdrant profile embedding for user '%s'", user_id)
-
-            # 3. Invalidate the cached feed batches for this user in PostgreSQL
+            # 2. Invalidate the cached feed batches for this user in PostgreSQL
+            # We do this BEFORE Qdrant so that if cache fails, we can rollback Postgres
+            # without having mutated Qdrant (which cannot be rolled back).
             cache_success = True
             if state_changed and resolved_alpha != 0.0:
                 cache_success = self.invalidate_user_feed_cache(user_id)
                 if not cache_success:
                     logger.warning("Failed to invalidate feed cache for user '%s'", user_id)
 
+            # 3. Update Qdrant user embedding vector using the resolved alpha
+            qdrant_success = True
+            if state_changed and resolved_alpha != 0.0:
+                if cache_success:
+                    qdrant_success = self.update_user_embedding(user_id, repo_id, resolved_alpha)
+                    if not qdrant_success:
+                        logger.warning("Failed to adjust Qdrant profile embedding for user '%s'", user_id)
+                else:
+                    qdrant_success = False
+
             if conn:
-                if db_success and qdrant_success:
+                if db_success and qdrant_success and cache_success:
                     conn.commit()
                 else:
                     conn.rollback()
 
-            return db_success and qdrant_success
+            return db_success and qdrant_success and cache_success
         except Exception:
             if conn:
                 conn.rollback()
