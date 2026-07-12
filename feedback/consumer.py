@@ -65,6 +65,14 @@ class FeedbackConsumer:
                 dwell_seconds_raw = event.get("dwell_seconds")
                 dwell_seconds = float(dwell_seconds_raw) if dwell_seconds_raw is not None else None
 
+                # Generate a stable message_id if one doesn't exist, so local retries
+                # can still benefit from replay guards if Redis becomes available.
+                if "message_id" not in event:
+                    import uuid
+                    event["message_id"] = f"local-{uuid.uuid4().hex}"
+                
+                message_id = event["message_id"]
+
                 if not user_id or not repo_id or not action:
                     queue.task_done()
                     continue
@@ -76,7 +84,7 @@ class FeedbackConsumer:
                     success = await loop.run_in_executor(
                         None,
                         lambda: self.handler.handle_feedback(
-                            user_id, repo_id, action, dwell_seconds=dwell_seconds
+                            user_id, repo_id, action, dwell_seconds=dwell_seconds, message_id=message_id
                         )
                     )
                 except Exception as exc:
