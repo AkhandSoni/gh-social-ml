@@ -214,7 +214,15 @@ class FeedbackHandler:
 
             if conn:
                 if db_success and qdrant_success and cache_success:
-                    conn.commit()
+                    try:
+                        conn.commit()
+                    except Exception as exc:
+                        conn.rollback()
+                        # Best-effort Qdrant rollback since Postgres commit failed
+                        if state_changed and resolved_alpha != 0.0:
+                            logger.error("Postgres commit failed, attempting to rollback Qdrant vector shift...")
+                            self.update_user_embedding(user_id, repo_id, -resolved_alpha)
+                        raise exc
                 else:
                     conn.rollback()
 
