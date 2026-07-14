@@ -42,8 +42,12 @@ class CorpusPipelineSettings:
         )
 
     def validated(self) -> "CorpusPipelineSettings":
-        positive_int(self.target_count, name="target_count")
-        positive_int(self.max_cycles, name="max_cycles")
+        target_count = positive_int(self.target_count, name="target_count")
+        max_cycles = positive_int(self.max_cycles, name="max_cycles")
         if not str(self.checkpoint_path).strip():
             raise ValueError("checkpoint_path must not be empty")
-        return self
+        return CorpusPipelineSettings(
+            target_count=target_count,
+            max_cycles=max_cycles,
+            checkpoint_path=Path(self.checkpoint_path),
+        )

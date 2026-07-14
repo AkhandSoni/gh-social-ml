@@ -40,7 +40,7 @@ class CorpusPipeline:
         self.quality_filter = quality_filter
         self.indexer = indexer
         self.settings = settings.validated()
-        self.checkpoint = checkpoint or CorpusCheckpoint(settings.checkpoint_path)
+        self.checkpoint = checkpoint or CorpusCheckpoint(self.settings.checkpoint_path)
         self.allow_without_postgres = allow_qdrant_without_postgres
         self.indexing_enabled = indexing_enabled
 
