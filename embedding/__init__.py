@@ -9,7 +9,10 @@ from .vector_contract import (
     VectorCollectionContract,
     repository_payload_defaults,
     repository_point_id,
+    resolve_repository_identity,
     user_point_id,
+    validate_embedding_vector,
+    validate_repository_payload,
 )
 
 __all__ = [
@@ -26,5 +29,8 @@ __all__ = [
     "REPOSITORY_PAYLOAD_REQUIRED_FIELDS",
     "repository_payload_defaults",
     "repository_point_id",
+    "resolve_repository_identity",
     "user_point_id",
+    "validate_embedding_vector",
+    "validate_repository_payload",
 ]

@@ -7,10 +7,14 @@ helpers here whenever it needs the corresponding Qdrant point ID.
 
 from __future__ import annotations
 
+import math
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
+from numbers import Real
 from types import MappingProxyType
+from typing import Any
 
 from config import (
     QDRANT_COLLECTION_NAME,
@@ -74,6 +78,56 @@ def user_point_id(user_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"user:{canonical}"))
 
 
+def resolve_repository_identity(repo: Mapping[str, Any]) -> tuple[str, str]:
+    """Return the canonical ``(repo_id, full_name)`` for a repository input.
+
+    ``repo_id`` is opaque: consumers must not assume it is a GitHub name or a
+    UUID.  Legacy acquisition payloads used ``id=owner/repository``; that shape
+    remains readable while all emitted payloads publish both fields explicitly.
+    """
+    if not isinstance(repo, Mapping):
+        raise TypeError("repository payload must be a mapping")
+
+    raw_repo_id = repo.get("repo_id") or repo.get("id")
+    repo_id = _canonical_identifier(raw_repo_id, field_name="repo_id")
+
+    raw_full_name = repo.get("full_name")
+    legacy_id = repo.get("id")
+    if raw_full_name is None and isinstance(legacy_id, str) and "/" in legacy_id:
+        raw_full_name = legacy_id
+    full_name = _canonical_identifier(raw_full_name, field_name="full_name")
+
+    owner, separator, name = full_name.partition("/")
+    if separator != "/" or not owner or not name or "/" in name:
+        raise ValueError("full_name must use the GitHub 'owner/repository' format")
+    return repo_id, full_name
+
+
+def validate_embedding_vector(
+    vector: Sequence[Real],
+    *,
+    expected_size: int,
+    field_name: str = "embedding",
+) -> list[float]:
+    """Validate and return a JSON-safe finite embedding vector."""
+    if isinstance(vector, (str, bytes)) or not isinstance(vector, Sequence):
+        raise TypeError(f"{field_name} must be a sequence of numbers")
+    if len(vector) != expected_size:
+        raise ValueError(
+            f"{field_name} has dimension {len(vector)}, expected {expected_size}."
+        )
+
+    validated: list[float] = []
+    for index, item in enumerate(vector):
+        if isinstance(item, bool) or not isinstance(item, Real):
+            raise TypeError(f"{field_name}[{index}] must be a real number")
+        value = float(item)
+        if not math.isfinite(value):
+            raise ValueError(f"{field_name}[{index}] must be finite")
+        validated.append(value)
+    return validated
+
+
 # Every repository point publishes these keys.  Nullable values are still
 # present so retrieval and ranking consumers receive one predictable shape.
 REPOSITORY_PAYLOAD_FIELD_TYPES: Mapping[str, type | tuple[type, ...]] = MappingProxyType(
@@ -114,6 +168,93 @@ REPOSITORY_PAYLOAD_FIELD_TYPES: Mapping[str, type | tuple[type, ...]] = MappingP
 )
 
 REPOSITORY_PAYLOAD_REQUIRED_FIELDS = tuple(REPOSITORY_PAYLOAD_FIELD_TYPES)
+
+_INTEGER_FIELDS = {
+    "star_count",
+    "fork_count",
+    "open_issues_count",
+    "readme_length",
+    "readme_chunks",
+    "pushed_days_ago",
+    "mentionable_users_count",
+    "embedding_dim",
+    "delta_3d",
+    "delta_7d",
+    "delta_30d",
+}
+_NON_NEGATIVE_INTEGER_FIELDS = _INTEGER_FIELDS - {"delta_3d", "delta_7d", "delta_30d"}
+_FINITE_NUMBER_FIELDS = {
+    "doc_quality",
+    "code_health",
+    "activity_score",
+    "trend_velocity",
+}
+_TIMESTAMP_FIELDS = {"created_at", "updated_at", "pushed_at"}
+_STRING_LIST_FIELDS = {"languages", "topics", "tags"}
+
+
+def validate_repository_payload(payload: Mapping[str, Any]) -> None:
+    """Validate one emitted repository payload against the frozen contract."""
+    if not isinstance(payload, Mapping):
+        raise TypeError("repository payload must be a mapping")
+
+    missing = [field for field in REPOSITORY_PAYLOAD_REQUIRED_FIELDS if field not in payload]
+    if missing:
+        raise ValueError(f"repository payload is missing required fields: {', '.join(missing)}")
+
+    for field_name, expected_type in REPOSITORY_PAYLOAD_FIELD_TYPES.items():
+        value = payload[field_name]
+        if not isinstance(value, expected_type):
+            raise TypeError(
+                f"repository payload field {field_name!r} has type "
+                f"{type(value).__name__}, expected {_type_label(expected_type)}"
+            )
+
+    resolve_repository_identity(payload)
+
+    for field_name in _INTEGER_FIELDS:
+        value = payload[field_name]
+        if isinstance(value, bool):
+            raise TypeError(f"repository payload field {field_name!r} must be an integer")
+
+    for field_name in _NON_NEGATIVE_INTEGER_FIELDS:
+        if payload[field_name] < 0:
+            raise ValueError(f"repository payload field {field_name!r} must be non-negative")
+
+    for field_name in _FINITE_NUMBER_FIELDS:
+        value = payload[field_name]
+        if isinstance(value, bool) or not math.isfinite(float(value)):
+            raise ValueError(f"repository payload field {field_name!r} must be finite")
+
+    for field_name in _TIMESTAMP_FIELDS:
+        value = payload[field_name]
+        if value is not None:
+            _parse_iso_timestamp(value, field_name=field_name)
+
+    for field_name in _STRING_LIST_FIELDS:
+        if any(not isinstance(item, str) for item in payload[field_name]):
+            raise TypeError(f"repository payload field {field_name!r} must contain strings")
+
+    if payload["embedding_dim"] != REPOSITORY_COLLECTION_CONTRACT.vector_size:
+        raise ValueError(
+            "repository payload embedding_dim does not match the collection contract"
+        )
+    for field_name in ("embedding_model", "embedding_version", "source_hash"):
+        if not payload[field_name].strip():
+            raise ValueError(f"repository payload field {field_name!r} must be non-empty")
+
+
+def _parse_iso_timestamp(value: str, *, field_name: str) -> None:
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be an ISO-8601 timestamp") from exc
+
+
+def _type_label(expected_type: type | tuple[type, ...]) -> str:
+    if isinstance(expected_type, tuple):
+        return " or ".join(item.__name__ for item in expected_type)
+    return expected_type.__name__
 
 
 def repository_payload_defaults() -> dict[str, object]:
