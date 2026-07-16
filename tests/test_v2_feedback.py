@@ -58,19 +58,21 @@ def test_feedback_skips_duplicate_and_holds_version_gap():
     ("forward", "reverse"),
     [("like", "unlike"), ("dislike", "undislike"), ("save", "unsave")],
 )
-def test_reversal_removes_the_exact_stored_preference(forward, reverse):
+def test_reversal_clears_state_without_rewriting_learned_vector(forward, reverse):
     user_id, repo_id = str(uuid.uuid4()), str(uuid.uuid4())
     client = FakeQdrant(user_id, repo_id)
     applier = OrderedFeedbackApplier(client)
 
     applier.apply(event(user_id, repo_id, 1, forward))
     assert not np.allclose(client.user.vector, [1.0, 0.0])
+    learned_vector = np.asarray(client.user.vector)
+    learned_latent = np.asarray(client.user.payload[LATENT_KEY])
 
     result = applier.apply(event(user_id, repo_id, 2, reverse))
 
     assert result.status == "applied"
-    assert np.allclose(client.user.vector, [1.0, 0.0])
-    assert np.allclose(client.user.payload[LATENT_KEY], [1.0, 0.0])
+    assert np.allclose(client.user.vector, learned_vector)
+    assert np.allclose(client.user.payload[LATENT_KEY], learned_latent)
     assert repo_id not in client.user.payload[ADJUSTMENTS_KEY]
     assert client.user.payload["last_feedback_version"] == 2
 
@@ -82,14 +84,28 @@ def test_reversal_preserves_later_unrelated_feedback():
 
     applier.apply(event(user_id, repo_id, 1, "like"))
     applier.apply(event(user_id, repo_id, 2, "readme_open"))
+    learned_vector = np.asarray(client.user.vector)
+    learned_latent = np.asarray(client.user.payload[LATENT_KEY])
     applier.apply(event(user_id, repo_id, 3, "unlike"))
 
-    # like: [1, 0] + 0.15 * ([0, 1] - [1, 0]) = [0.85, 0.15]
-    # readme_open then contributes 0.05 * ([0, 1] - [0.85, 0.15]).
-    # Reversing like removes only its exact stored delta.
-    expected = np.asarray([0.9575, 0.0425])
-    expected /= np.linalg.norm(expected)
-    assert np.allclose(client.user.vector, expected)
+    assert np.allclose(client.user.vector, learned_vector)
+    assert np.allclose(client.user.payload[LATENT_KEY], learned_latent)
+    assert repo_id not in client.user.payload[ADJUSTMENTS_KEY]
+
+
+def test_forward_action_can_apply_again_after_zero_alpha_reversal():
+    user_id, repo_id = str(uuid.uuid4()), str(uuid.uuid4())
+    client = FakeQdrant(user_id, repo_id)
+    applier = OrderedFeedbackApplier(client)
+
+    applier.apply(event(user_id, repo_id, 1, "like"))
+    applier.apply(event(user_id, repo_id, 2, "unlike"))
+    latent_after_reversal = np.asarray(client.user.payload[LATENT_KEY])
+    applier.apply(event(user_id, repo_id, 3, "like"))
+
+    assert not np.allclose(client.user.payload[LATENT_KEY], latent_after_reversal)
+    assert client.user.payload[ADJUSTMENTS_KEY][repo_id]["reaction"]["action"] == "like"
+    assert client.user.payload["last_feedback_version"] == 3
 
 
 @pytest.mark.parametrize("passive_action", ["readme_open", "github_open", "share"])

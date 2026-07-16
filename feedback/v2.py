@@ -233,9 +233,10 @@ class OrderedFeedbackApplier:
             family = definition.state_family or ""
             stored = repo_state.get(family)
             if stored and stored.get("action") == definition.reversal_of:
-                accumulator -= self._finite_vector(
-                    stored.get("delta"), dimension, label="stored feedback delta"
-                )
+                # Backend product state is authoritative. The initial v2 ML
+                # policy records reversals as zero-alpha audit transitions:
+                # clear active ML state, but do not claim that subtracting a
+                # historical delta reconstructs the counterfactual vector.
                 repo_state.pop(family, None)
         elif definition.state_family:
             family = definition.state_family
