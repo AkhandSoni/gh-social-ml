@@ -104,6 +104,75 @@ def _point_vector(
     return list(value), None
 
 
+def _payload_mapping(payload: Mapping[str, Any], key: str) -> dict[str, Any]:
+    """Return a mutable payload mapping or reject corrupted legacy state."""
+    value = payload.get(key, {})
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{key} must be an object")
+    return copy.deepcopy(dict(value))
+
+
+def _processed_events(payload: Mapping[str, Any]) -> list[str]:
+    value = payload.get(PROCESSED_KEY, [])
+    if not isinstance(value, list) or any(
+        not isinstance(event_id, str) or not event_id for event_id in value
+    ):
+        raise ValueError(f"{PROCESSED_KEY} must be a list of non-empty strings")
+    return list(value)
+
+
+def _feedback_adjustments(
+    payload: Mapping[str, Any], dimension: int
+) -> dict[str, dict[str, Any]]:
+    adjustments = _payload_mapping(payload, ADJUSTMENTS_KEY)
+    validated: dict[str, dict[str, Any]] = {}
+    for repo_id, repo_state in adjustments.items():
+        if not isinstance(repo_id, str) or not repo_id:
+            raise ValueError(f"{ADJUSTMENTS_KEY} repository keys must be non-empty strings")
+        if not isinstance(repo_state, Mapping):
+            raise ValueError(f"{ADJUSTMENTS_KEY}[{repo_id!r}] must be an object")
+        validated_state: dict[str, Any] = {}
+        for family, stored in repo_state.items():
+            if not isinstance(family, str) or not family:
+                raise ValueError(f"{ADJUSTMENTS_KEY} family keys must be non-empty strings")
+            if not isinstance(stored, Mapping):
+                raise ValueError(
+                    f"{ADJUSTMENTS_KEY}[{repo_id!r}][{family!r}] must be an object"
+                )
+            action = stored.get("action")
+            if not isinstance(action, str) or not action:
+                raise ValueError(
+                    f"{ADJUSTMENTS_KEY}[{repo_id!r}][{family!r}].action "
+                    "must be a non-empty string"
+                )
+            _vector(
+                stored.get("delta", []),
+                dimension,
+                label=f"{ADJUSTMENTS_KEY}[{repo_id!r}][{family!r}].delta",
+            )
+            validated_state[family] = copy.deepcopy(dict(stored))
+        validated[repo_id] = validated_state
+    return validated
+
+
+def _applied_signals(payload: Mapping[str, Any]) -> dict[str, list[str]]:
+    signals = _payload_mapping(payload, APPLIED_SIGNALS_KEY)
+    validated: dict[str, list[str]] = {}
+    for repo_id, actions in signals.items():
+        if not isinstance(repo_id, str) or not repo_id:
+            raise ValueError(
+                f"{APPLIED_SIGNALS_KEY} repository keys must be non-empty strings"
+            )
+        if not isinstance(actions, list) or any(
+            not isinstance(action, str) or not action for action in actions
+        ):
+            raise ValueError(
+                f"{APPLIED_SIGNALS_KEY}[{repo_id!r}] must be a list of non-empty strings"
+            )
+        validated[repo_id] = list(actions)
+    return validated
+
+
 class FeedbackHandler:
     """Apply one idempotent feedback event to an existing Qdrant user point.
 
@@ -179,8 +248,10 @@ class FeedbackHandler:
             point, self.settings.user_vector_name, label="user profile"
         )
         _vector(search_vector, self.settings.vector_dimension, label="user vector")
-        payload = copy.deepcopy(point.payload or {})
-        processed = [str(value) for value in payload.get(PROCESSED_KEY, [])]
+        if point.payload is not None and not isinstance(point.payload, Mapping):
+            raise ValueError("user profile payload must be an object")
+        payload = copy.deepcopy(dict(point.payload or {}))
+        processed = _processed_events(payload)
         if event_id in processed:
             return True
 
@@ -189,11 +260,9 @@ class FeedbackHandler:
             self.settings.vector_dimension,
             label="latent user vector",
         )
-        adjustments: dict[str, Any] = copy.deepcopy(payload.get(ADJUSTMENTS_KEY, {}))
+        adjustments = _feedback_adjustments(payload, self.settings.vector_dimension)
         repo_state = adjustments.setdefault(repo_id, {})
-        applied_signals: dict[str, list[str]] = copy.deepcopy(
-            payload.get(APPLIED_SIGNALS_KEY, {})
-        )
+        applied_signals = _applied_signals(payload)
 
         if action == "dwell":
             if dwell_seconds is None:

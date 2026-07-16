@@ -19,6 +19,7 @@ from feedback.event_handlers import (
     ADJUSTMENTS_KEY,
     APPLIED_SIGNALS_KEY,
     LATENT_KEY,
+    PROCESSED_KEY,
     FeedbackHandler,
     dwell_alpha,
     normalize_vector,
@@ -91,6 +92,23 @@ def test_action_registry_is_complete_and_immutable():
     assert get_interaction("impression").realtime is False
     assert get_interaction("readme_open").apply_once is True
     assert get_interaction("dwell").apply_once is False
+    assert {
+        action: definition.reference_score
+        for action, definition in INTERACTIONS.items()
+    } == {
+        "impression": 0.0,
+        "dwell": 0.0,
+        "readme_open": 0.2,
+        "github_open": 0.3,
+        "share": 0.6,
+        "like": 1.0,
+        "unlike": 0.0,
+        "dislike": -1.0,
+        "undislike": 0.0,
+        "save": 0.8,
+        "unsave": 0.0,
+    }
+    assert get_interaction("like").feedback_score == 1.0
     with pytest.raises(TypeError):
         INTERACTIONS["new"] = get_interaction("like")
     with pytest.raises(ValueError):
@@ -208,6 +226,42 @@ def test_missing_user_or_repository_is_retryable(settings):
     qdrant.user = None
     handler = FeedbackHandler(qdrant_client=qdrant, settings=settings)
     assert not handler.handle_feedback(USER_ID, REPO_ID, "like", event_id="1")
+
+
+@pytest.mark.parametrize(
+    ("payload", "error_fragment"),
+    [
+        (["legacy-payload"], "user profile payload"),
+        ({PROCESSED_KEY: "event-1"}, PROCESSED_KEY),
+        ({ADJUSTMENTS_KEY: []}, ADJUSTMENTS_KEY),
+        ({ADJUSTMENTS_KEY: {REPO_ID: []}}, ADJUSTMENTS_KEY),
+        (
+            {
+                ADJUSTMENTS_KEY: {
+                    REPO_ID: {
+                        "reaction": {"action": "like", "delta": [0.1]}
+                    }
+                }
+            },
+            "delta",
+        ),
+        ({APPLIED_SIGNALS_KEY: []}, APPLIED_SIGNALS_KEY),
+        ({APPLIED_SIGNALS_KEY: {REPO_ID: "readme_open"}}, APPLIED_SIGNALS_KEY),
+    ],
+)
+def test_malformed_qdrant_feedback_payload_is_rejected_safely(
+    settings, payload, error_fragment
+):
+    qdrant = FakeQdrant()
+    qdrant.user.payload = payload
+    handler = FeedbackHandler(qdrant_client=qdrant, settings=settings)
+
+    with pytest.raises(ValueError) as exc_info:
+        handler.handle_feedback(USER_ID, REPO_ID, "like", event_id="event-1")
+
+    assert error_fragment in str(exc_info.value)
+    assert qdrant.upserts == 0
+    assert qdrant.repo_reads == 0
 
 
 @pytest.mark.anyio
