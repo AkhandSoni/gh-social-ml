@@ -22,7 +22,17 @@ jobs:
             git pull --ff-only
             export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
             if ! command -v uv >/dev/null 2>&1; then
-              curl -LsSf https://astral.sh/uv/install.sh | sh
+              UV_VERSION="0.11.29"
+              UV_INSTALLER_SHA256="504a79fd2ed0dcd47e7f04f0792cfd0871f62e24a7fe40fa8ae0f563a369f2bd"
+              UV_INSTALLER="$(mktemp)"
+              trap 'rm -f "$UV_INSTALLER"' EXIT
+              curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+                "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-installer.sh" \
+                --output "$UV_INSTALLER"
+              echo "${UV_INSTALLER_SHA256}  ${UV_INSTALLER}" | sha256sum --check --strict
+              UV_NO_MODIFY_PATH=1 sh "$UV_INSTALLER"
+              rm -f "$UV_INSTALLER"
+              trap - EXIT
               export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
             fi
             UV_PROJECT_ENVIRONMENT=venv uv sync --locked --no-dev
