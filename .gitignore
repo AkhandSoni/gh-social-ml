@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+tmp_pytest/
 .DS_Store
 .env
 .coverage

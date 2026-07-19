@@ -10,10 +10,11 @@ from dataclasses import asdict
 from functools import lru_cache
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from config import internal_api_header_name
 from embedding.embedding_pipeline import RepositoryEmbeddingPipeline
 from embedding.qdrant_store import QdrantRepositoryStore
 from embedding.vector_contract import repository_point_ids
@@ -29,12 +30,13 @@ EventType = Literal[
 
 
 async def require_internal_secret(
-    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+    request: Request,
 ) -> None:
     expected = os.getenv("INTERNAL_API_SECRET")
     if not expected:
         raise HTTPException(status_code=503, detail="Internal API secret is not configured.")
-    if not x_internal_secret or not hmac.compare_digest(x_internal_secret, expected):
+    supplied = request.headers.get(internal_api_header_name())
+    if not supplied or not hmac.compare_digest(supplied, expected):
         raise HTTPException(status_code=401, detail="Invalid or missing internal secret.")
 
 

@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 
+from config import internal_api_header_name
 from feedback.consumer import FeedbackConsumer
 from feedback.event_handlers import FeedbackHandler
 from feedback.interactions import INTERACTIONS, get_interaction, normalize_interaction
@@ -160,8 +161,7 @@ async def authenticate_non_health_routes(request: Request, call_next):
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={"detail": "Internal API authentication is not configured."},
         )
-    header_name = os.getenv("INTERNAL_API_HEADER", "x-internal-secret").lower()
-    supplied = request.headers.get(header_name)
+    supplied = request.headers.get(internal_api_header_name())
     if not supplied or not hmac.compare_digest(supplied, secret):
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
