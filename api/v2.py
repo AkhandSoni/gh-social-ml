@@ -859,6 +859,11 @@ def _embed_repository_job_locked(request: RepositoryJob, lock: Any, deadline: fl
         expected_point=expected_point,
     )
     lock.assert_owned()
+    # A same-version content-CAS winner can be classified as current without
+    # containing this request's lifecycle observation. Merge it independently
+    # on the readback before acknowledging the job.
+    if stored is not None:
+        stored = _apply_lifecycle_observation(stored, request.repository.lifecycle, lock)
     final_status, final_version = _repository_cas_outcome(
         stored,
         version_field="content_version",
